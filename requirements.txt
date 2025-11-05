@@ -1,0 +1,7 @@
+requests
+qbittorrent-api
+SQLAlchemy
+psycopg2-binary
+pandas
+cinemagoer
+huggingface_hub
