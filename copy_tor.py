@@ -149,8 +149,8 @@ def parse_torrent_name(name):
         (r'[Ee]p[\s\.\-_]*(\d{1,3})(?:\D|$)', False, 'episode_abbr'),
         
         # 14. PART/CHAPTER ONLY (as episode, season = 1)
-        # Part 1, P1, Pt1, Pt.1
-        (r'[Pp](?:art|t)?[\s\.\-_]*(\d{1,3})(?:\D|$)', False, 'part_only'),
+        # Part 1, P1, Pt1, Pt.1 (but NOT 10bit, 8bit, etc - quality indicators)
+        (r'[Pp](?:art|t)[\s\.\-_]+(\d{1,3})(?:\D|$)', False, 'part_only'),  # Requires "art" or "t" after P
         # Chapter 1, Ch1, Ch.1
         (r'[Cc](?:hapter|h)?[\s\.\-_]*(\d{1,3})(?:\D|$)', False, 'chapter_only'),
         
@@ -234,7 +234,7 @@ def parse_torrent_name(name):
         title_part = name_clean[:match_pos]
     else:
         # No season/episode found, try to extract before quality/year info
-        quality_match = re.search(r'(720p|1080p|2160p|4k|480p|576p|\d{4}|bluray|brrip|webrip|web-dl|hdtv|sdtv|dvdrip|xvid|x264|x265|h264|h265|hevc|avc|10bit|hdr)', 
+        quality_match = re.search(r'(720p|1080p|2160p|4k|480p|576p|\d{4}|\d+bit|bluray|brrip|webrip|web-dl|hdtv|sdtv|dvdrip|xvid|x264|x265|h264|h265|hevc|avc|hdr|ds4k|hs)', 
                                   name_clean, re.IGNORECASE)
         if quality_match:
             title_part = name_clean[:quality_match.start()]
