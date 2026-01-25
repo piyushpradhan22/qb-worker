@@ -280,11 +280,13 @@ for tor in torrs:
         
     if not video_files:
         print("No video files found...")
-    if tor.name[:5] == 'imdb:':
+    if tor.name[:5] == 'imdbm' or tor.name[:5] == 'imdbs':
+        type_indicator = tor.name[4]  # 'm' or 's'
         imdb_id = tor.name.split(":")[1]
         tor.name = tor.name.split(":")[2]
     else:
         imdb_id = None
+        type_indicator = None
     for vd in video_files:
         file_path = vd['file_path']
         file_name = file_path.split("/")[-1]
@@ -296,15 +298,20 @@ for tor in torrs:
         print(message)
         ptn = parse_torrent_name(file_name)
         ptn_tor = parse_torrent_name(tor.name)
-        imdb = ia.search_movie(ptn_tor['title']) if 'season' in ptn.keys() else ia.search_movie(ptn['title'])
+        if type_indicator == 's':
+            imdb = ia.search_movie(ptn_tor['title'])
+        else:
+            imdb = ia.search_movie(ptn['title'])
         imdb = imdb if imdb else ia.search_movie(ptn_tor['title'])
         imdb = imdb if imdb else ia.search_movie(ptn['title'])
         if not imdb_id:
             imdb_id = 'tt'+imdb[0].movieID if imdb else ''
-            imdb_id = f"tt{imdb[0].movieID}:{ptn['season']}:{ptn['episode']}" if 'episode' in ptn.keys() else imdb_id
+            if type_indicator == 's':
+                imdb_id = f"tt{imdb[0].movieID}:{ptn['season']}:{ptn['episode']}"
         else:
             imdb_id = imdb_id.split(":")[0]
-            imdb_id = f"{imdb_id}:{ptn['season']}:{ptn['episode']}" if 'episode' in ptn.keys() else imdb_id
+            if type_indicator == 's':
+                imdb_id = f"{imdb_id}:{ptn['season']}:{ptn['episode']}"
         server_url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{file_hash}?download=true"
         
         df = pd.DataFrame([{"imdb_id": imdb_id, 'name' : tor.name, 'file_name' : file_name, "url" : server_url, "size" : vd["size"], "time" : time.time(), "hash" : tor.hash}])
