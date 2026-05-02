@@ -16,7 +16,8 @@ qbt_client.auth_log_in()
 
 ## Install Search Plugins
 urls = ["https://raw.githubusercontent.com/LightDestory/qBittorrent-Search-Plugins/master/src/engines/snowfl.py",
-        "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/therarbg.py"]
+        "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/therarbg.py",
+        "https://raw.githubusercontent.com/BurningMop/qBittorrent-Search-Plugins/refs/heads/main/bitsearch.py"]
 qbt_client.search_install_plugin(sources=urls)
 
 print("Search Plugins installed")

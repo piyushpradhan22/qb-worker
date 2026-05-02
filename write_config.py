@@ -14,7 +14,7 @@ WebUI\\Password_PBKDF2={enc_password}
 
 [AutoRun]
 enabled=true
-program=python3 copy_tor.py
+program=python3 copy_tor_v2.py
 """
 
 with open("/home/user/.config/qBittorrent/qBittorrent.conf", "w") as f:
