@@ -21,17 +21,64 @@ class MediaMetadata:
     confidence: float | None = None
 
 
+def search_imdb_api(title: str, year: int | None = None, kind: str | None = None) -> str:
+    """Search IMDb suggestion API for an IMDb ID.
+    Returns the IMDb ID (e.g. tt1375666) or empty string if not found."""
+    if not title or not title.strip():
+        return ""
+
+    headers = {"User-Agent": "qb-worker/1.0 (torrent metadata resolver; python-requests)"}
+    
+    try:
+        query = title.strip().lower()
+        first_letter = query[0] if query else "x"
+        url = f"https://v3.sg.media-imdb.com/suggestion/{first_letter}/{query}.json"
+        
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        results = data.get("d", [])
+        if not results:
+            return ""
+        
+        # Filter by year and kind if provided
+        for result in results:
+            result_year = result.get("y")
+            result_kind = result.get("q", "").lower()
+            
+            # Match year if specified
+            if year and result_year != year:
+                continue
+            
+            # Match kind if specified
+            if kind:
+                if kind == "movie" and result_kind not in ["feature", "tv movie"]:
+                    continue
+                if kind == "series" and result_kind not in ["tv series", "tv mini-series"]:
+                    continue
+            
+            imdb_id = result.get("id", "")
+            if imdb_id and IMDB_ID_RE.match(imdb_id):
+                return imdb_id
+        
+        return ""
+    except Exception:
+        return ""
+
+
 def web_search_imdb(query: str) -> str:
-    """Search Wikipedia for an IMDb ID. Query format: 'Title year film' or 'Title TV series'.
+    """Search for an IMDb ID via Wikipedia and IMDb API.
+    Query format: 'Title year film' or 'Title TV series'.
     Returns the IMDb ID (e.g. tt1375666) or a descriptive failure string."""
     if not query or not query.strip():
         return "No results found"
 
     headers = {"User-Agent": "qb-worker/1.0 (torrent metadata resolver; python-requests)"}
-    api_url = "https://en.wikipedia.org/w/api.php"
+    wiki_api_url = "https://en.wikipedia.org/w/api.php"
 
     try:
-        # Step 1: Search Wikipedia for the article
+        # Step 1: Try Wikipedia first
         search_params = {
             "action": "query",
             "list": "search",
@@ -39,33 +86,54 @@ def web_search_imdb(query: str) -> str:
             "format": "json",
             "srlimit": 3,
         }
-        resp = requests.get(api_url, params=search_params, headers=headers, timeout=10)
+        resp = requests.get(wiki_api_url, params=search_params, headers=headers, timeout=10)
         resp.raise_for_status()
         results = resp.json().get("query", {}).get("search", [])
-        if not results:
-            return "No results found"
-
-        # Step 2: Check external links in top articles for IMDb link
-        for result in results[:2]:
-            page_title = result["title"]
-            ext_params = {
-                "action": "query",
-                "prop": "extlinks",
-                "titles": page_title,
-                "format": "json",
-                "ellimit": 50,
-            }
-            ext_resp = requests.get(api_url, params=ext_params, headers=headers, timeout=10)
-            ext_resp.raise_for_status()
-            pages = ext_resp.json().get("query", {}).get("pages", {})
-            for page in pages.values():
-                for link in page.get("extlinks", []):
-                    url = link.get("*", "")
-                    imdb_match = re.search(r"imdb\.com/title/(tt\d{7,9})", url)
-                    if imdb_match:
-                        return imdb_match.group(1)
-
-        return "No IMDb ID found in Wikipedia article"
+        
+        if results:
+            # Step 2: Check external links in top articles for IMDb link
+            for result in results[:2]:
+                page_title = result["title"]
+                ext_params = {
+                    "action": "query",
+                    "prop": "extlinks",
+                    "titles": page_title,
+                    "format": "json",
+                    "ellimit": 50,
+                }
+                ext_resp = requests.get(wiki_api_url, params=ext_params, headers=headers, timeout=10)
+                ext_resp.raise_for_status()
+                pages = ext_resp.json().get("query", {}).get("pages", {})
+                for page in pages.values():
+                    for link in page.get("extlinks", []):
+                        url = link.get("*", "")
+                        imdb_match = re.search(r"imdb\.com/title/(tt\d{7,9})", url)
+                        if imdb_match:
+                            return imdb_match.group(1)
+        
+        # Step 3: Fallback to IMDb API if Wikipedia fails
+        # Parse title, year, and kind from query string
+        title = query
+        year = None
+        kind = None
+        
+        # Try to extract year from query (e.g., "Hoppers 2026 film")
+        year_match = re.search(r"\b(19|20)\d{2}\b", query)
+        if year_match:
+            year = int(year_match.group(0))
+            title = query[:year_match.start()].strip()
+        
+        # Try to detect kind from query
+        if "series" in query.lower():
+            kind = "series"
+        elif "film" in query.lower() or "movie" in query.lower():
+            kind = "movie"
+        
+        imdb_id = search_imdb_api(title, year, kind)
+        if imdb_id:
+            return imdb_id
+        
+        return "No IMDb ID found"
     except Exception as e:
         return f"Search failed: {str(e)}"
 
