@@ -187,7 +187,7 @@ def process(dry_run: bool = False) -> None:
 
         for video in video_files:
             file_name = os.path.basename(video.file_path)
-            if "sample" in file_name.lower():
+            if "sample" in file_name.lower() or "trailer" in file_name.lower() or "teaser" in file_name.lower() or "preview" in file_name.lower():
                 continue
 
             if dry_run:
