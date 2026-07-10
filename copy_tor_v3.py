@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 import pandas as pd
 import qbittorrentapi
 import requests
+from guessit import guessit
 from huggingface_hub import HfApi
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
@@ -20,10 +22,6 @@ from torrent_metadata import parse_prefixed_torrent_name
 CREDENTIALS_URL = (
     "https://raw.githubusercontent.com/piyushpradhan22/credentials/refs/heads/main/credentials.json"
 )
-PARSE_API_BASE = os.getenv(
-    "PARSE_API_BASE",
-    "https://guzowskilynottmvvy49011733757114-ptn.hf.space",
-).rstrip("/")
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg"}
 
 
@@ -115,24 +113,253 @@ def _regex_episode(file_name: str) -> tuple[int | None, int | None]:
     return int(match.group(1)), int(match.group(2))
 
 
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
+def clean_title(title: str) -> str:
+    cleaned = title.lower()
+    if cleaned.startswith("the "):
+        cleaned = cleaned[4:]
+    # Replace dots and hyphens to unify titles like "K.G.F" or "Hanu-Man"
+    cleaned = cleaned.replace(".", "").replace("-", "")
+    # Merge single characters separated by spaces (e.g., "k g f" -> "kgf")
+    cleaned = re.sub(r"\b([a-zA-Z])\s+(?=[a-zA-Z]\b)", r"\1", cleaned)
+    cleaned = re.sub(r"[^\w\s-]", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+def digits_match(target: str, candidate: str) -> bool:
+    """Ensure digits/numbers in the titles match exactly to prevent sequel/parts collisions.
+    Only enforce if the target title contains digits."""
+    target_digits = re.findall(r"\d+", target)
+    if not target_digits:
+        return True  # Allow any candidate if target has no digits
+    candidate_digits = re.findall(r"\d+", candidate)
+    return target_digits == candidate_digits
+
+def fix_guessit_title(parsed, original_name) -> str | None:
+    title = parsed.get("title")
+    container = parsed.get("container")
+    if container and title:
+        containers = [container] if isinstance(container, str) else container
+        for c in containers:
+            if not original_name.lower().endswith("." + c.lower()):
+                # It was a false container! Check if the title is missing this word
+                pattern = rf"^{c}\b"
+                if re.search(pattern, original_name, re.IGNORECASE):
+                    title = f"{c} {title}"
+                    title = re.sub(r"\s+", " ", title).strip()
+    return title
+
+def is_bonus_extra(name: str) -> bool:
+    extra_keywords = [
+        "making of", "featurette", "deleted", "trailer", "extra", 
+        "bonus", "behind the scenes", "scene", "video musicale", 
+        "music video", "interview", "promo", "clip"
+    ]
+    name_lower = name.lower()
+    return any(kw in name_lower for kw in extra_keywords)
+
+def resolve_via_tvmaze(title: str) -> str | None:
+    try:
+        url = "https://api.tvmaze.com/singlesearch/shows"
+        resp = requests.get(url, params={"q": title}, headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            imdb_id = data.get("externals", {}).get("imdb")
+            if imdb_id:
+                return imdb_id
+    except Exception:
+        pass
+    return None
+
+def resolve_via_imdb_suggestion(title: str, year: int | None = None, is_series: bool = False) -> str | None:
+    cleaned_target_title = clean_title(title)
+    if not cleaned_target_title:
+        return None
+    
+    first_char = cleaned_target_title[0] if cleaned_target_title[0].isalnum() else "x"
+    encoded_query = urllib.parse.quote(cleaned_target_title)
+    url = f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{encoded_query}.json"
+    
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code != 200:
+            return None
+        
+        data = resp.json()
+        results = data.get("d", [])
+        if not results:
+            return None
+        
+        best_candidate = None
+        highest_score = -9999
+        
+        for idx, result in enumerate(results):
+            imdb_id = result.get("id", "")
+            if not imdb_id.startswith("tt"):
+                continue
+            
+            result_title = result.get("l", "")
+            result_year = result.get("y")
+            result_kind = result.get("q", "").lower()
+            
+            cleaned_result_title = clean_title(result_title)
+            
+            if not digits_match(cleaned_target_title, cleaned_result_title):
+                continue
+            
+            title_score = 0
+            if cleaned_target_title == cleaned_result_title:
+                title_score = 150
+            elif cleaned_result_title.startswith(cleaned_target_title):
+                title_score = 80
+            elif cleaned_target_title in cleaned_result_title:
+                if len(cleaned_target_title) > 5 and " " in cleaned_target_title:
+                    title_score = 40
+            
+            if title_score == 0:
+                continue
+            
+            year_score = 0
+            if year is not None:
+                if result_year is not None:
+                    diff = abs(year - result_year)
+                    if diff == 0:
+                        year_score = 100
+                    elif diff == 1:
+                        if title_score == 150:
+                            year_score = 50
+                        else:
+                            year_score = -300
+                    else:
+                        year_score = -300
+                else:
+                    year_score = -15
+            
+            kind_score = 0
+            is_result_series = "series" in result_kind or "mini-series" in result_kind
+            is_result_movie = "feature" in result_kind or "movie" in result_kind or result_kind == "documentary"
+            
+            if is_series == is_result_series:
+                kind_score = 50
+            elif is_series and is_result_movie:
+                kind_score = -50
+            elif not is_series and is_result_series:
+                kind_score = -50
+                
+            rank_score = -idx * 5
+            total_score = title_score + year_score + kind_score + rank_score
+            
+            if total_score > highest_score:
+                highest_score = total_score
+                best_candidate = imdb_id
+                
+        if highest_score > 0:
+            return best_candidate
+            
+    except Exception:
+        pass
+    return None
+
+def get_top_imdb_suggestion_fallback(title: str, year: int | None = None) -> str | None:
+    cleaned_target_title = clean_title(title)
+    if not cleaned_target_title:
+        return None
+    
+    first_char = cleaned_target_title[0] if cleaned_target_title[0].isalnum() else "x"
+    encoded_query = urllib.parse.quote(cleaned_target_title)
+    url = f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{encoded_query}.json"
+    
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            results = resp.json().get("d", [])
+            for result in results[:2]:
+                imdb_id = result.get("id", "")
+                if imdb_id.startswith("tt"):
+                    result_title = result.get("l", "")
+                    cleaned_result_title = clean_title(result_title)
+                    
+                    if not digits_match(cleaned_target_title, cleaned_result_title):
+                        continue
+                        
+                    # Fallback length ratio check
+                    len1 = len(cleaned_target_title)
+                    len2 = len(cleaned_result_title)
+                    if min(len1, len2) / max(len1, len2) < 0.4:
+                        continue
+                        
+                    result_year = result.get("y")
+                    if year is not None and result_year is not None:
+                        if abs(year - result_year) > 3:
+                            continue
+                    return imdb_id
+    except Exception:
+        pass
+    return None
+
 def parse_torrent_metadata(torrent_name: str, torrent_file: str) -> ParseResult:
-    payload = {"torrent_name": torrent_name, "torrent_file": torrent_file}
-    response = requests.post(f"{PARSE_API_BASE}/api/parse", json=payload, timeout=30)
-    response.raise_for_status()
+    parsed_file = guessit(torrent_file)
+    parsed_tor = guessit(torrent_name)
+    
+    title_tor = fix_guessit_title(parsed_tor, torrent_name) or parsed_tor.get("title")
+    title_file = fix_guessit_title(parsed_file, torrent_file) or parsed_file.get("title")
+    
+    if title_file and is_bonus_extra(torrent_file):
+        title = title_tor or title_file
+    elif title_tor and title_file:
+        if len(title_file) > len(title_tor) and clean_title(title_tor) in clean_title(title_file):
+            title = title_file
+        elif len(title_tor) > len(title_file) and clean_title(title_file) in clean_title(title_tor):
+            title = title_tor
+        else:
+            title = title_tor
+    else:
+        title = title_tor or title_file
+    
+    year = parsed_tor.get("year") or parsed_file.get("year")
+    season = parsed_file.get("season") or parsed_tor.get("season")
+    episode = parsed_file.get("episode") or parsed_tor.get("episode")
+    
+    if season is not None and season > 100:
+        season = None
 
-    body = response.json()
-    if body.get("status") != "success":
-        raise RuntimeError(body.get("error") or "parse API returned non-success status")
+    is_series = (parsed_file.get("type") == "episode" or 
+                 parsed_tor.get("type") == "episode" or 
+                 season is not None or 
+                 episode is not None)
 
-    data = body.get("data") or {}
-    episode = data.get("episode") or {}
-    title_type = str(data.get("title_type") or "").lower()
+    if not title:
+        raise ValueError("Could not parse title from torrent name or file name")
+
+    imdb_id = None
+    if is_series:
+        imdb_id = resolve_via_tvmaze(title)
+        
+    if not imdb_id:
+        imdb_id = resolve_via_imdb_suggestion(title, year, is_series)
+        
+
+    if not imdb_id and title_tor and title_tor != title:
+        imdb_id = resolve_via_imdb_suggestion(title_tor, year, is_series)
+    if not imdb_id and title_file and title_file != title:
+        imdb_id = resolve_via_imdb_suggestion(title_file, year, is_series)
+        
+    if not imdb_id and len(clean_title(title)) < 15:
+        stripped_title = clean_title(title).replace(" ", "")
+        if stripped_title != clean_title(title):
+            imdb_id = resolve_via_imdb_suggestion(stripped_title, year, is_series)
+            
+    if not imdb_id:
+        imdb_id = get_top_imdb_suggestion_fallback(title, year)
 
     return ParseResult(
-        imdb_id=str(data.get("imdb_id") or "").strip(),
-        is_series=bool(data.get("is_series")) or title_type in {"tvseries", "tvmini", "tvminiseries"},
-        season=_to_int(episode.get("season")),
-        episode=_to_int(episode.get("episode")),
+        imdb_id=imdb_id or "",
+        is_series=is_series,
+        season=season,
+        episode=episode,
     )
 
 
@@ -249,13 +476,56 @@ def process(dry_run: bool = False) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Upload completed torrents and resolve metadata via parse API")
+    parser = argparse.ArgumentParser(description="Upload completed torrents and resolve metadata via keyless resolver")
     parser.add_argument("--dry-run", action="store_true", help="Run without upload, DB insert, pause, or delete")
+    parser.add_argument("--test", action="store_true", help="Run self-tests on the metadata resolver")
+    parser.add_argument("--torrent", type=str, help="Custom torrent name to test resolve")
+    parser.add_argument("--file", type=str, help="Custom file name to test resolve")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    if args.dry_run:
-        print("Running in DRY RUN mode: no upload, DB writes, pause, or delete will be performed.")
-    process(dry_run=args.dry_run)
+    if args.torrent or args.file:
+        torrent_val = args.torrent or ""
+        file_val = args.file or ""
+        print("Testing custom metadata resolution:")
+        print(f"  Torrent Name: '{torrent_val}'")
+        print(f"  File Name   : '{file_val}'")
+        try:
+            res = parse_torrent_metadata(torrent_val, file_val)
+            final_id = build_imdb_id(res.imdb_id, res.is_series, res.season, res.episode)
+            print(f"\nResolved ID : {final_id}")
+            print(f"Details     : is_series={res.is_series}, season={res.season}, episode={res.episode}")
+        except Exception as e:
+            print(f"\nResolution Error: {e}")
+    elif args.test:
+        print("Running parser and resolver self-tests...")
+        scenarios = [
+            ("Partner (2007) 1080p bluray", "Partner.2007.1080p.BluRay.x264.AAC5.1-[YTS.MX].mp4", "tt0807758"),
+            ("Sandeep Aur Pinky Faraar (2021) 1080p web", "Sandeep.Aur.Pinky.Faraar.2021.1080p.WEBRip.x264.AAC5.1-[YTS.MX].mp4", "tt7094488"),
+            ("Stranger Things S01 (2016) Season 1 BluRay 1080p 10bit HEVC [Hindi DDP 5.1 - English AAC 5.1] x265 -RONIN", "Stranger Things S01E03 Chapter Three - Holly, Jolly.mkv", "tt4574334:1:3"),
+            ("Twisters.2024.2160p.WEB-DL.DV.HDR10.PLUS.ENG.LATINO.HINDI.DDP5.1.Atmos.H265.MKV-BEN.THE.ME...", "Twisters.2024.2160p.WEB-DL.DV.HDR10.PLUS.ENG.LATINO.HINDI.DDP5.1.Atmos.H265.MKV-BEN.THE.MEN.mkv", "tt12584954"),
+            ("Almost Pyaar with DJ Mohabbat (2022) 1080p web", "Almost.Pyaar.With.DJ.Mohabbat.2023.1080p.WEBRip.x264.AAC5.1-[YTS.MX].mp4", "tt23472806"),
+            ("Mirzapur.2024.S03.1080p.AMZN.WEB-DL.HEVC.DDP5.1.Esub-KIN", "Mirzapur_S03E10_Pratibimbh.mkv", "tt6473300:3:10")
+        ]
+        passed = 0
+        for name, filename, expected in scenarios:
+            print(f"\nTesting: '{name}'")
+            try:
+                res = parse_torrent_metadata(name, filename)
+                resolved = build_imdb_id(res.imdb_id, res.is_series, res.season, res.episode)
+                print(f"Result: {resolved} (Expected: {expected})")
+                if resolved == expected:
+                    print("Status: PASSED")
+                    passed += 1
+                else:
+                    print("Status: FAILED")
+            except Exception as e:
+                print(f"Error: {e}")
+                print("Status: FAILED")
+        print(f"\nSelf-tests result: {passed}/{len(scenarios)} passed.")
+    else:
+        if args.dry_run:
+            print("Running in DRY RUN mode: no upload, DB writes, pause, or delete will be performed.")
+        process(dry_run=args.dry_run)
