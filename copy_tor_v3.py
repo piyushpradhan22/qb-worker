@@ -138,6 +138,46 @@ def digits_match(target: str, candidate: str) -> bool:
     candidate_digits = re.findall(r"\d+", candidate)
     return target_digits == candidate_digits
 
+
+def title_lookup_variants(title: str) -> list[str]:
+    """Generate likely title variants for IMDb lookups when guessit leaves a trailing sequel number in the title."""
+    variants: list[str] = []
+    seen: set[str] = set()
+
+    def add_variant(value: str | None) -> None:
+        if not value:
+            return
+        value = value.strip()
+        value = re.sub(r"\s+", " ", value).strip(" ._-")
+        if value and value not in seen:
+            variants.append(value)
+            seen.add(value)
+
+    if title:
+        base = title.strip()
+        add_variant(base)
+        add_variant(base.rstrip(". "))
+        add_variant(re.sub(r"[._-]+", " ", base))
+
+    for variant in list(variants):
+        match = re.search(r"^(.*?)(\d+)\s*\.?\s*$", variant)
+        if not match:
+            continue
+        prefix = match.group(1).strip()
+        number = match.group(2)
+        prefix = re.sub(r"[._-]+", " ", prefix).strip()
+        prefix = re.sub(r"\s+", " ", prefix).strip(" ._-")
+        if not prefix:
+            continue
+        for label in ("chapter", "part", ""):
+            if label:
+                add_variant(f"{prefix} {label} {number}")
+            else:
+                add_variant(f"{prefix} {number}")
+
+    return variants
+
+
 def fix_guessit_title(parsed, original_name) -> str | None:
     title = parsed.get("title")
     container = parsed.get("container")
@@ -175,129 +215,135 @@ def resolve_via_tvmaze(title: str) -> str | None:
     return None
 
 def resolve_via_imdb_suggestion(title: str, year: int | None = None, is_series: bool = False) -> str | None:
-    cleaned_target_title = clean_title(title)
-    if not cleaned_target_title:
+    candidates = title_lookup_variants(title)
+    if not candidates:
         return None
-    
-    first_char = cleaned_target_title[0] if cleaned_target_title[0].isalnum() else "x"
-    encoded_query = urllib.parse.quote(cleaned_target_title)
-    url = f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{encoded_query}.json"
-    
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code != 200:
-            return None
-        
-        data = resp.json()
-        results = data.get("d", [])
-        if not results:
-            return None
-        
-        best_candidate = None
-        highest_score = -9999
-        
-        for idx, result in enumerate(results):
-            imdb_id = result.get("id", "")
-            if not imdb_id.startswith("tt"):
+
+    for target_title in candidates:
+        cleaned_target_title = clean_title(target_title)
+        if not cleaned_target_title:
+            continue
+
+        first_char = cleaned_target_title[0] if cleaned_target_title[0].isalnum() else "x"
+        encoded_query = urllib.parse.quote(cleaned_target_title)
+        url = f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{encoded_query}.json"
+
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            if resp.status_code != 200:
                 continue
-            
-            result_title = result.get("l", "")
-            result_year = result.get("y")
-            result_kind = result.get("q", "").lower()
-            
-            cleaned_result_title = clean_title(result_title)
-            
-            if not digits_match(cleaned_target_title, cleaned_result_title):
+
+            data = resp.json()
+            results = data.get("d", [])
+            if not results:
                 continue
-            
-            title_score = 0
-            if cleaned_target_title == cleaned_result_title:
-                title_score = 150
-            elif cleaned_result_title.startswith(cleaned_target_title):
-                title_score = 80
-            elif cleaned_target_title in cleaned_result_title:
-                if len(cleaned_target_title) > 5 and " " in cleaned_target_title:
-                    title_score = 40
-            
-            if title_score == 0:
-                continue
-            
-            year_score = 0
-            if year is not None:
-                if result_year is not None:
-                    diff = abs(year - result_year)
-                    if diff == 0:
-                        year_score = 100
-                    elif diff == 1:
-                        if title_score == 150:
-                            year_score = 50
+
+            best_candidate = None
+            highest_score = -9999
+
+            for idx, result in enumerate(results):
+                imdb_id = result.get("id", "")
+                if not imdb_id.startswith("tt"):
+                    continue
+
+                result_title = result.get("l", "")
+                result_year = result.get("y")
+                result_kind = result.get("q", "").lower()
+
+                cleaned_result_title = clean_title(result_title)
+
+                if not digits_match(cleaned_target_title, cleaned_result_title):
+                    continue
+
+                title_score = 0
+                if cleaned_target_title == cleaned_result_title:
+                    title_score = 150
+                elif cleaned_result_title.startswith(cleaned_target_title):
+                    title_score = 80
+                elif cleaned_target_title in cleaned_result_title:
+                    if len(cleaned_target_title) > 5 and " " in cleaned_target_title:
+                        title_score = 40
+
+                if title_score == 0:
+                    continue
+
+                year_score = 0
+                if year is not None:
+                    if result_year is not None:
+                        diff = abs(year - result_year)
+                        if diff == 0:
+                            year_score = 100
+                        elif diff == 1:
+                            if title_score == 150:
+                                year_score = 50
+                            else:
+                                year_score = -300
                         else:
                             year_score = -300
                     else:
-                        year_score = -300
-                else:
-                    year_score = -15
-            
-            kind_score = 0
-            is_result_series = "series" in result_kind or "mini-series" in result_kind
-            is_result_movie = "feature" in result_kind or "movie" in result_kind or result_kind == "documentary"
-            
-            if is_series == is_result_series:
-                kind_score = 50
-            elif is_series and is_result_movie:
-                kind_score = -50
-            elif not is_series and is_result_series:
-                kind_score = -50
-                
-            rank_score = -idx * 5
-            total_score = title_score + year_score + kind_score + rank_score
-            
-            if total_score > highest_score:
-                highest_score = total_score
-                best_candidate = imdb_id
-                
-        if highest_score > 0:
-            return best_candidate
-            
-    except Exception:
-        pass
+                        year_score = -15
+
+                kind_score = 0
+                is_result_series = "series" in result_kind or "mini-series" in result_kind
+                is_result_movie = "feature" in result_kind or "movie" in result_kind or result_kind == "documentary"
+
+                if is_series == is_result_series:
+                    kind_score = 50
+                elif is_series and is_result_movie:
+                    kind_score = -50
+                elif not is_series and is_result_series:
+                    kind_score = -50
+
+                rank_score = -idx * 5
+                total_score = title_score + year_score + kind_score + rank_score
+
+                if total_score > highest_score:
+                    highest_score = total_score
+                    best_candidate = imdb_id
+
+            if highest_score > 0:
+                return best_candidate
+
+        except Exception:
+            continue
     return None
 
+
 def get_top_imdb_suggestion_fallback(title: str, year: int | None = None) -> str | None:
-    cleaned_target_title = clean_title(title)
-    if not cleaned_target_title:
-        return None
-    
-    first_char = cleaned_target_title[0] if cleaned_target_title[0].isalnum() else "x"
-    encoded_query = urllib.parse.quote(cleaned_target_title)
-    url = f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{encoded_query}.json"
-    
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        if resp.status_code == 200:
-            results = resp.json().get("d", [])
-            for result in results[:2]:
-                imdb_id = result.get("id", "")
-                if imdb_id.startswith("tt"):
-                    result_title = result.get("l", "")
-                    cleaned_result_title = clean_title(result_title)
-                    
-                    if not digits_match(cleaned_target_title, cleaned_result_title):
-                        continue
-                        
-                    # Fallback length ratio check
-                    len1 = len(cleaned_target_title)
-                    len2 = len(cleaned_result_title)
-                    if min(len1, len2) / max(len1, len2) < 0.4:
-                        continue
-                        
-                    result_year = result.get("y")
-                    if year is not None and result_year is not None:
-                        if abs(year - result_year) > 3:
+    for target_title in title_lookup_variants(title):
+        cleaned_target_title = clean_title(target_title)
+        if not cleaned_target_title:
+            continue
+
+        first_char = cleaned_target_title[0] if cleaned_target_title[0].isalnum() else "x"
+        encoded_query = urllib.parse.quote(cleaned_target_title)
+        url = f"https://v3.sg.media-imdb.com/suggestion/{first_char}/{encoded_query}.json"
+
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=10)
+            if resp.status_code == 200:
+                results = resp.json().get("d", [])
+                for result in results[:2]:
+                    imdb_id = result.get("id", "")
+                    if imdb_id.startswith("tt"):
+                        result_title = result.get("l", "")
+                        cleaned_result_title = clean_title(result_title)
+
+                        if not digits_match(cleaned_target_title, cleaned_result_title):
                             continue
-                    return imdb_id
-    except Exception:
-        pass
+
+                        len1 = len(cleaned_target_title)
+                        len2 = len(cleaned_result_title)
+                        if min(len1, len2) / max(len1, len2) < 0.4:
+                            continue
+
+                        result_year = result.get("y")
+                        if year is not None and result_year is not None:
+                            if abs(year - result_year) > 3:
+                                continue
+                        return imdb_id
+        except Exception:
+            continue
     return None
 
 def parse_torrent_metadata(torrent_name: str, torrent_file: str) -> ParseResult:
