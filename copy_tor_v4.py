@@ -459,11 +459,12 @@ def process(dry_run: bool = False) -> None:
                     print(f"Upload failed for {file_name}: {upload_error}")
                     continue
 
+            clean_file_name = clean_torrent_name(file_name)
             server_url = f"https://huggingface.co/datasets/{repo_id}/resolve/main/{remote_name}?download=true"
             row = {
                 "imdb_id": imdb_key,
-                "name": cleaned_name or file_name,
-                "file_name": file_name,
+                "name": cleaned_name or clean_file_name,
+                "file_name": clean_file_name,
                 "url": server_url,
                 "size": video_file.stat().st_size,
                 "time": time.time(),
