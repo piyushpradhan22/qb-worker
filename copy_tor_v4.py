@@ -377,7 +377,7 @@ def process(dry_run: bool = False) -> None:
         host="localhost",
         port=7860,
         username=creds["username"],
-        password=creds["password"],
+        password=creds.get("qb_password") or creds["password"],
     )
     qbt_client.auth_log_in()
 
@@ -389,8 +389,23 @@ def process(dry_run: bool = False) -> None:
         hf_api = HfApi(token=creds["hf_token"])
     repo_id = creds["repo_id"]
 
-    torrents = [tor for tor in qbt_client.torrents_info() if tor.progress == 1 and tor.state != "pausedUP"]
-    print("Received torrents:", [tor.name for tor in torrents])
+    def is_stream_active(info_hash: str) -> bool:
+        try:
+            r = requests.get(f"http://127.0.0.1:8000/api/is_active/{info_hash}", timeout=2)
+            if r.status_code == 200:
+                return r.json().get("active", False)
+        except Exception:
+            pass
+        return False
+
+    all_completed = [tor for tor in qbt_client.torrents_info() if tor.progress == 1 and tor.state != "pausedUP"]
+    torrents = []
+    for tor in all_completed:
+        if is_stream_active(tor.hash):
+            print(f"[copy_tor_v4] Skipping {tor.name}: stream is actively requesting bytes in Stremio. Holding off until playback finishes.")
+            continue
+        torrents.append(tor)
+    print("Received torrents to process:", [tor.name for tor in torrents])
 
     if torrents:
         if dry_run:
@@ -416,6 +431,10 @@ def process(dry_run: bool = False) -> None:
                 print(f"[DRY RUN] Would delete torrent and files: {tor.hash}")
             else:
                 qbt_client.torrents_delete(delete_files=True, torrent_hashes=tor.hash)
+            try:
+                requests.post("http://127.0.0.1:8090/torrents", json={"action": "rem", "hash": tor.hash}, timeout=3)
+            except Exception:
+                pass
             continue
 
         infohash = extract_infohash(tor.hash) or tor.hash
@@ -484,6 +503,10 @@ def process(dry_run: bool = False) -> None:
             print(f"[DRY RUN] Would delete torrent and files: {tor.hash}")
         else:
             qbt_client.torrents_delete(delete_files=True, torrent_hashes=tor.hash)
+            try:
+                requests.post("http://127.0.0.1:8090/torrents", json={"action": "rem", "hash": tor.hash}, timeout=3)
+            except Exception:
+                pass
 
 
 # ==============================================================================
