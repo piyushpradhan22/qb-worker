@@ -1,4 +1,4 @@
-# VERSION: 4.0
+# VERSION: 5.0
 # AUTHORS: Piyush
 
 import concurrent.futures
@@ -22,7 +22,7 @@ LOCAL_FLARESOLVERR = "http://127.0.0.1:8191/v1"
 PUBLIC_FLARESOLVERR = "https://flaresolverr.129.159.238.209.sslip.io/v1"
 
 # Maximum number of top results to resolve magnet links for
-MAX_RESULTS = 10
+MAX_RESULTS = 6
 
 try:
     SSL_CTX = ssl._create_unverified_context()
@@ -125,12 +125,12 @@ class one337x(object):
             payload = {
                 "cmd": "request.get",
                 "url": desc_link,
-                "maxTimeout": 20000
+                "maxTimeout": 45000
             }
             if session_id:
                 payload["session"] = session_id
 
-            res = self._flaresolverr_post(payload, timeout=25)
+            res = self._flaresolverr_post(payload, timeout=50)
             if res:
                 html_content = res.get("solution", {}).get("response", "")
                 return self._extract_magnet(html_content)
@@ -144,11 +144,15 @@ class one337x(object):
             print(f"{url_safe} {url_safe}")
             return
 
-        magnet = self.get_magnet(clean_info)
-        if magnet:
-            url_safe_magnet = magnet.strip().replace(" ", "%20")
-            url_safe_info = clean_info.replace(" ", "%20")
-            print(f"{url_safe_magnet} {url_safe_info}")
+        session_id = self._create_session()
+        try:
+            magnet = self.get_magnet(clean_info, session_id=session_id)
+            if magnet:
+                url_safe_magnet = magnet.strip().replace(" ", "%20")
+                url_safe_info = clean_info.replace(" ", "%20")
+                print(f"{url_safe_magnet} {url_safe_info}")
+        finally:
+            self._destroy_session(session_id)
 
     def search(self, what, cat="all"):
         clean_what = urllib.parse.unquote(what).strip()
