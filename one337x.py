@@ -1,4 +1,4 @@
-# VERSION: 5.0
+# VERSION: 5.1
 # AUTHORS: Piyush
 
 import concurrent.futures
@@ -22,7 +22,7 @@ LOCAL_FLARESOLVERR = "http://127.0.0.1:8191/v1"
 PUBLIC_FLARESOLVERR = "https://flaresolverr.129.159.238.209.sslip.io/v1"
 
 # Maximum number of top results to resolve magnet links for
-MAX_RESULTS = 6
+MAX_RESULTS = 20
 
 try:
     SSL_CTX = ssl._create_unverified_context()
