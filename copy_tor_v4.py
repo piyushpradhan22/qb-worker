@@ -280,6 +280,13 @@ def parse_torrent_metadata(torrent_name: str, file_name: str, imdb_override: str
             if not imdb_id and title:
                 imdb_id = resolve_imdb_id(str(title), None, is_series=False)
 
+        if not imdb_id:
+            m = re.match(r"^([^\(\[\.]+?)\s*\((19\d\d|20\d\d)\)", clean_torrent_name(torrent_name) or clean_torrent_name(file_name))
+            if m:
+                cand_title = m.group(1).strip()
+                cand_year = int(m.group(2))
+                imdb_id = resolve_imdb_id(cand_title, cand_year if not is_series else None, is_series=is_series)
+
     return {
         "title": str(title),
         "year": int(year) if year is not None else None,
@@ -384,8 +391,12 @@ def process(dry_run: bool = False) -> None:
     postgres_engine = None
     hf_api = None
     if not dry_run:
-        postgres_engine = create_engine(creds["postgres_url"], poolclass=NullPool)
-        ensure_hftor_table(postgres_engine)
+        try:
+            postgres_engine = create_engine(creds["postgres_url"], poolclass=NullPool)
+            ensure_hftor_table(postgres_engine)
+        except Exception as exc:
+            print(f"[copy_tor_v4] Warning: Failed to connect to Postgres ({exc}). Continuing without Postgres logging.")
+            postgres_engine = None
         hf_api = HfApi(token=creds["hf_token"])
     repo_id = creds["repo_id"]
 
